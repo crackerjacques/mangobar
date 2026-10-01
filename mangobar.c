@@ -2385,6 +2385,39 @@ static const struct zxdg_output_v1_listener output_listener = {
     .description = output_description,
 };
 
+// ---------- Seat ----------
+static void seat_capabilities(void *data, struct wl_seat *wl_seat,
+                              uint32_t caps) {
+  bool has_pointer = caps & WL_SEAT_CAPABILITY_POINTER;
+  if (has_pointer && !pointer) {
+    pointer = wl_seat_get_pointer(wl_seat);
+    wl_pointer_add_listener(pointer, &pointer_listener, NULL);
+  } else if (!has_pointer && pointer) {
+    if (wl_pointer_get_version(pointer) >= WL_POINTER_RELEASE_SINCE_VERSION)
+      wl_pointer_release(pointer);
+    else
+      wl_pointer_destroy(pointer);
+    pointer = NULL;
+    if (pointer_bar) {
+      pointer_bar->hover_tag = -1;
+      pointer_bar->redraw = true;
+    }
+    pointer_bar = NULL;
+    memset(axis_steps, 0, sizeof(axis_steps));
+    memset(axis_value, 0, sizeof(axis_value));
+    memset(axis_smooth_remainder, 0, sizeof(axis_smooth_remainder));
+    frame_has_axis = false;
+    axis_stop_mask = 0;
+  }
+}
+
+static void seat_name(void *data, struct wl_seat *wl_seat, const char *name) {}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
+};
+
 static void registry_global(void *data, struct wl_registry *registry,
                             uint32_t name, const char *interface,
                             uint32_t version) {
@@ -2409,9 +2442,11 @@ static void registry_global(void *data, struct wl_registry *registry,
     }
   }
   else if (strcmp(interface, wl_seat_interface.name) == 0) {
-    seat = wl_registry_bind(registry, name, &wl_seat_interface, 7);
-    pointer = wl_seat_get_pointer(seat);
-    wl_pointer_add_listener(pointer, &pointer_listener, NULL);
+    // Pointer is acquired from the capabilities event; calling get_pointer on
+    // a seat that never had a pointer is a protocol error (touch-only devices).
+    seat = wl_registry_bind(registry, name, &wl_seat_interface,
+                            version < 7 ? version : 7);
+    wl_seat_add_listener(seat, &seat_listener, NULL);
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
     // Defer surface creation until the xdg-output name arrives so the profile
     // can be matched first.
@@ -3809,7 +3844,7 @@ static void wl_pointer_enter(void *data, struct wl_pointer *wl_pointer,
     if (cur) {
       struct wl_cursor_image *img = cur->images[0];
       wl_surface_attach(cursor_surface, wl_cursor_image_get_buffer(img), 0, 0);
-      wl_pointer_set_cursor(pointer, serial, cursor_surface, img->hotspot_x,
+      wl_pointer_set_cursor(wl_pointer, serial, cursor_surface, img->hotspot_x,
                             img->hotspot_y);
       wl_surface_damage_buffer(cursor_surface, 0, 0, INT32_MAX, INT32_MAX);
       wl_surface_commit(cursor_surface);
